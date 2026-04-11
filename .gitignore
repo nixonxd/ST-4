@@ -1,0 +1,17 @@
+bin/
+obj/
+.vs/
+
+TestResults/
+*.user
+*.suo
+*.userosscache
+*.rsuser
+
+.idea/
+.vscode/
+.dotnet/
+.nuget/
+
+*.nupkg
+*.snupkg
