@@ -7,48 +7,59 @@ public sealed class Bug
     public enum State
     {
         New,
-        Triaged,
-        InProgress,
-        WaitingForInfo,
-        Deferred,
-        Resolved,
-        Closed,
+        Registered,
+        Investigating,
+        WaitingForReporter,
+        Scheduled,
+        ReadyForQa,
+        Done,
+        Archived,
         Reopened,
-        Rejected,
+        Declined,
         Duplicate,
-        CannotReproduce
+        NeedMoreEvidence
     }
 
     public enum Trigger
     {
-        Triage,
-        StartProgress,
-        RequestInfo,
-        ProvideInfo,
-        Defer,
-        Resume,
-        Resolve,
-        VerifyFix,
+        Register,
+        TakeToWork,
+        AskReporter,
+        ReporterAnswered,
+        PutIntoBacklog,
+        PullFromBacklog,
+        SendToQa,
+        CheckFix,
         Reopen,
-        Close,
-        MarkNotABug,
+        Archive,
+        Decline,
         MarkDuplicate,
-        MarkCannotReproduce,
-        ReturnToTriaged
+        RequestEvidence,
+        ReturnToQueue
     }
 
     private readonly StateMachine<State, Trigger> _workflow;
-    private readonly StateMachine<State, Trigger>.TriggerWithParameters<bool> _verifyFixTrigger;
+    private readonly List<string> _history = [];
+    private readonly StateMachine<State, Trigger>.TriggerWithParameters<bool> _checkFixTrigger;
 
     public Bug()
     {
-        var history = new List<string>();
-        History = history;
         _workflow = new StateMachine<State, Trigger>(State.New);
-        _verifyFixTrigger = _workflow.SetTriggerParameters<bool>(Trigger.VerifyFix);
+        _checkFixTrigger = _workflow.SetTriggerParameters<bool>(Trigger.CheckFix);
 
-        ConfigureWorkflow(history);
+        CreatedAt = DateTime.UtcNow;
+        Summary = "Bug without title";
+        Owner = "unassigned";
+        History = _history.AsReadOnly();
+
+        ConfigureWorkflow();
     }
+
+    public string Summary { get; private set; }
+
+    public string Owner { get; private set; }
+
+    public DateTime CreatedAt { get; }
 
     public IReadOnlyList<string> History { get; }
 
@@ -57,120 +68,140 @@ public sealed class Bug
     public bool CanFire(Trigger trigger) => _workflow.CanFire(trigger);
 
     public bool IsFinalState =>
-        CurrentState is State.Closed or State.Rejected or State.Duplicate;
+        CurrentState is State.Archived or State.Declined or State.Duplicate;
 
-    public void Triage() => Fire(Trigger.Triage);
+    public void Capture(string summary, string owner)
+    {
+        Summary = string.IsNullOrWhiteSpace(summary) ? "Bug without title" : summary.Trim();
+        Owner = string.IsNullOrWhiteSpace(owner) ? "unassigned" : owner.Trim();
+    }
 
-    public void StartProgress() => Fire(Trigger.StartProgress);
+    public void Register() => Fire(Trigger.Register);
 
-    public void RequestInfo() => Fire(Trigger.RequestInfo);
+    public void TakeToWork() => Fire(Trigger.TakeToWork);
 
-    public void ProvideInfo() => Fire(Trigger.ProvideInfo);
+    public void AskReporter() => Fire(Trigger.AskReporter);
 
-    public void Defer() => Fire(Trigger.Defer);
+    public void ReporterAnswered() => Fire(Trigger.ReporterAnswered);
 
-    public void Resume() => Fire(Trigger.Resume);
+    public void PutIntoBacklog() => Fire(Trigger.PutIntoBacklog);
 
-    public void Resolve() => Fire(Trigger.Resolve);
+    public void PullFromBacklog() => Fire(Trigger.PullFromBacklog);
 
-    public void VerifyFix(bool isFixed) => _workflow.Fire(_verifyFixTrigger, isFixed);
+    public void SendToQa() => Fire(Trigger.SendToQa);
+
+    public void CheckFix(bool isAcceptedByQa) => _workflow.Fire(_checkFixTrigger, isAcceptedByQa);
 
     public void Reopen() => Fire(Trigger.Reopen);
 
-    public void Close() => Fire(Trigger.Close);
+    public void Archive() => Fire(Trigger.Archive);
 
-    public void MarkNotABug() => Fire(Trigger.MarkNotABug);
+    public void Decline() => Fire(Trigger.Decline);
 
     public void MarkDuplicate() => Fire(Trigger.MarkDuplicate);
 
-    public void MarkCannotReproduce() => Fire(Trigger.MarkCannotReproduce);
+    public void RequestEvidence() => Fire(Trigger.RequestEvidence);
 
-    public void ReturnToTriaged() => Fire(Trigger.ReturnToTriaged);
+    public void ReturnToQueue() => Fire(Trigger.ReturnToQueue);
+
+    public string DescribeAllowedActions()
+    {
+        var allowed = Enum.GetValues<Trigger>()
+            .Where(CanFire)
+            .Select(trigger => trigger.ToString())
+            .ToArray();
+
+        return allowed.Length == 0 ? "No actions available" : string.Join(", ", allowed);
+    }
 
     public override string ToString() =>
-        $"Bug state: {CurrentState}; final: {IsFinalState}; history size: {History.Count}";
+        $"[{CurrentState}] {Summary} | owner: {Owner} | final: {IsFinalState} | transitions: {History.Count}";
 
-    private void ConfigureWorkflow(ICollection<string> history)
+    private void ConfigureWorkflow()
     {
-        _workflow.OnTransitioned(transition => history.Add(FormatTransition(transition)));
+        _workflow.OnTransitioned(transition => _history.Add(FormatTransition(transition)));
 
         ConfigureNewState();
-        ConfigureTriagedState();
-        ConfigureInProgressState();
-        ConfigureWaitingForInfoState();
-        ConfigureDeferredState();
-        ConfigureResolvedState();
-        ConfigureReviewStates();
+        ConfigureRegisteredState();
+        ConfigureInvestigatingState();
+        ConfigureWaitingForReporterState();
+        ConfigureScheduledState();
+        ConfigureReadyForQaState();
+        ConfigureTerminalStates();
         ConfigureReopenedState();
     }
 
     private void ConfigureNewState()
     {
         _workflow.Configure(State.New)
-            .Permit(Trigger.Triage, State.Triaged);
+            .Permit(Trigger.Register, State.Registered);
     }
 
-    private void ConfigureTriagedState()
+    private void ConfigureRegisteredState()
     {
-        _workflow.Configure(State.Triaged)
-            .Permit(Trigger.StartProgress, State.InProgress)
-            .Permit(Trigger.RequestInfo, State.WaitingForInfo)
-            .Permit(Trigger.Defer, State.Deferred)
-            .Permit(Trigger.MarkNotABug, State.Rejected)
+        _workflow.Configure(State.Registered)
+            .Permit(Trigger.TakeToWork, State.Investigating)
+            .Permit(Trigger.AskReporter, State.WaitingForReporter)
+            .Permit(Trigger.PutIntoBacklog, State.Scheduled)
+            .Permit(Trigger.Decline, State.Declined)
             .Permit(Trigger.MarkDuplicate, State.Duplicate)
-            .Permit(Trigger.MarkCannotReproduce, State.CannotReproduce);
+            .Permit(Trigger.RequestEvidence, State.NeedMoreEvidence);
     }
 
-    private void ConfigureInProgressState()
+    private void ConfigureInvestigatingState()
     {
-        _workflow.Configure(State.InProgress)
-            .Permit(Trigger.RequestInfo, State.WaitingForInfo)
-            .Permit(Trigger.Defer, State.Deferred)
-            .Permit(Trigger.Resolve, State.Resolved);
+        _workflow.Configure(State.Investigating)
+            .Permit(Trigger.AskReporter, State.WaitingForReporter)
+            .Permit(Trigger.PutIntoBacklog, State.Scheduled)
+            .Permit(Trigger.SendToQa, State.ReadyForQa);
     }
 
-    private void ConfigureWaitingForInfoState()
+    private void ConfigureWaitingForReporterState()
     {
-        _workflow.Configure(State.WaitingForInfo)
-            .Permit(Trigger.ProvideInfo, State.Triaged)
-            .Permit(Trigger.StartProgress, State.InProgress);
+        _workflow.Configure(State.WaitingForReporter)
+            .Permit(Trigger.ReporterAnswered, State.Registered)
+            .Permit(Trigger.TakeToWork, State.Investigating);
     }
 
-    private void ConfigureDeferredState()
+    private void ConfigureScheduledState()
     {
-        _workflow.Configure(State.Deferred)
-            .Permit(Trigger.Resume, State.Triaged);
+        _workflow.Configure(State.Scheduled)
+            .Permit(Trigger.PullFromBacklog, State.Registered);
     }
 
-    private void ConfigureResolvedState()
+    private void ConfigureReadyForQaState()
     {
-        _workflow.Configure(State.Resolved)
-            .PermitIf(_verifyFixTrigger, State.Closed, isFixed => isFixed)
-            .PermitIf(_verifyFixTrigger, State.Reopened, isFixed => !isFixed)
+        _workflow.Configure(State.ReadyForQa)
+            .PermitIf(_checkFixTrigger, State.Done, isAcceptedByQa => isAcceptedByQa)
+            .PermitIf(_checkFixTrigger, State.Reopened, isAcceptedByQa => !isAcceptedByQa)
             .Permit(Trigger.Reopen, State.Reopened);
     }
 
-    private void ConfigureReviewStates()
+    private void ConfigureTerminalStates()
     {
-        _workflow.Configure(State.CannotReproduce)
-            .Permit(Trigger.Close, State.Closed)
+        _workflow.Configure(State.NeedMoreEvidence)
+            .Permit(Trigger.Archive, State.Archived)
             .Permit(Trigger.Reopen, State.Reopened);
 
-        _workflow.Configure(State.Rejected)
+        _workflow.Configure(State.Declined)
             .Permit(Trigger.Reopen, State.Reopened);
 
         _workflow.Configure(State.Duplicate)
             .Permit(Trigger.Reopen, State.Reopened);
 
-        _workflow.Configure(State.Closed)
+        _workflow.Configure(State.Done)
+            .Permit(Trigger.Archive, State.Archived)
+            .Permit(Trigger.Reopen, State.Reopened);
+
+        _workflow.Configure(State.Archived)
             .Permit(Trigger.Reopen, State.Reopened);
     }
 
     private void ConfigureReopenedState()
     {
         _workflow.Configure(State.Reopened)
-            .Permit(Trigger.ReturnToTriaged, State.Triaged)
-            .Permit(Trigger.StartProgress, State.InProgress);
+            .Permit(Trigger.ReturnToQueue, State.Registered)
+            .Permit(Trigger.TakeToWork, State.Investigating);
     }
 
     private static string FormatTransition(StateMachine<State, Trigger>.Transition transition) =>
@@ -184,14 +215,18 @@ public static class Program
     public static void Main()
     {
         var bug = new Bug();
+        bug.Capture("Crash when user saves profile without avatar", "qa-team");
 
-        Console.WriteLine("Bug workflow demo");
+        Console.WriteLine("Workflow demo for a tracked bug");
         Console.WriteLine(bug);
-        bug.Triage();
-        bug.StartProgress();
-        bug.Resolve();
-        bug.VerifyFix(false);
-        bug.ReturnToTriaged();
+        Console.WriteLine($"Allowed actions: {bug.DescribeAllowedActions()}");
+
+        bug.Register();
+        bug.TakeToWork();
+        bug.SendToQa();
+        bug.CheckFix(false);
+        bug.ReturnToQueue();
+
         Console.WriteLine(bug);
         foreach (var item in bug.History)
         {
